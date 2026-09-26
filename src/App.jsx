@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import './App.css';
 
 const STORAGE_KEY = 'attendance-system-v1';
@@ -14,21 +14,20 @@ const defaultData = {
 };
 
 function getStoredData() {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (!saved) return defaultData;
-
   try {
-    return JSON.parse(saved);
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return saved ? JSON.parse(saved) : defaultData;
   } catch {
     return defaultData;
   }
 }
 
 export default function App() {
-  const [classes, setClasses] = useState(() => getStoredData().classes);
-  const [students, setStudents] = useState(() => getStoredData().students);
-  const [attendance, setAttendance] = useState(() => getStoredData().attendance);
-  const [selectedClassId, setSelectedClassId] = useState(1);
+  const initial = getStoredData();
+  const [classes, setClasses] = useState(initial.classes);
+  const [students, setStudents] = useState(initial.students);
+  const [attendance, setAttendance] = useState(initial.attendance);
+  const [selectedClassId, setSelectedClassId] = useState(initial.classes[0]?.id || '');
   const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [className, setClassName] = useState('');
   const [studentName, setStudentName] = useState('');
@@ -39,88 +38,72 @@ export default function App() {
   }, [classes, students, attendance]);
 
   useEffect(() => {
-    if (!classes.length) return;
-    if (!classes.some((cls) => cls.id === selectedClassId)) {
+    if (classes.length && !classes.some((item) => item.id === selectedClassId)) {
       setSelectedClassId(classes[0].id);
     }
   }, [classes, selectedClassId]);
 
-  const addClass = (e) => {
-    e.preventDefault();
-    const trimmed = className.trim();
-    if (!trimmed) return;
+  const classStudents = students.filter((student) => student.classId === selectedClassId);
+  const recordsForDate = attendance[selectedDate]?.[selectedClassId] || {};
 
-    const newClass = { id: Date.now(), name: trimmed };
-    setClasses((prev) => [...prev, newClass]);
+  const reportRows = useMemo(() => classStudents.map((student) => {
+    let present = 0;
+    let absent = 0;
+    let late = 0;
+
+    Object.values(attendance).forEach((dateClasses) => {
+      const record = dateClasses[selectedClassId]?.[student.id];
+      if (record?.status === 'present') present += 1;
+      if (record?.status === 'absent') absent += 1;
+      if (record?.status === 'late') late += 1;
+    });
+
+    return { ...student, present, absent, late, total: present + absent + late };
+  }), [attendance, classStudents, selectedClassId]);
+
+  const dailyStats = classStudents.reduce((result, student) => {
+    const status = recordsForDate[student.id]?.status || 'absent';
+    result[status] += 1;
+    return result;
+  }, { present: 0, absent: 0, late: 0 });
+
+  const updateRecord = (studentId, changes) => {
+    setAttendance((previous) => ({
+      ...previous,
+      [selectedDate]: {
+        ...(previous[selectedDate] || {}),
+        [selectedClassId]: {
+          ...(previous[selectedDate]?.[selectedClassId] || {}),
+          [studentId]: {
+            ...(previous[selectedDate]?.[selectedClassId]?.[studentId] || {}),
+            ...changes
+          }
+        }
+      }
+    }));
+  };
+
+  const addClass = (event) => {
+    event.preventDefault();
+    const name = className.trim();
+    if (!name) return;
+    const newClass = { id: Date.now(), name };
+    setClasses((previous) => [...previous, newClass]);
     setSelectedClassId(newClass.id);
     setClassName('');
   };
 
-  const addStudent = (e) => {
-    e.preventDefault();
-    const trimmedName = studentName.trim();
-    const trimmedRoll = rollNumber.trim();
-
-    if (!selectedClassId || !trimmedName || !trimmedRoll) {
+  const addStudent = (event) => {
+    event.preventDefault();
+    const name = studentName.trim();
+    const roll = rollNumber.trim();
+    if (!selectedClassId || !name || !roll) {
       alert('يرجى تعبئة جميع الحقول');
       return;
     }
-
-    const newStudent = {
-      id: Date.now(),
-      classId: selectedClassId,
-      name: trimmedName,
-      rollNumber: trimmedRoll
-    };
-
-    setStudents((prev) => [...prev, newStudent]);
+    setStudents((previous) => [...previous, { id: Date.now(), classId: selectedClassId, name, rollNumber: roll }]);
     setStudentName('');
     setRollNumber('');
-  };
-
-  const classStudents = students.filter((student) => student.classId === selectedClassId);
-  const recordsForDate = attendance[selectedDate]?.[selectedClassId] || {};
-
-  const handleStatusChange = (studentId, status) => {
-    setAttendance((prev) => {
-      const dateMap = prev[selectedDate] || {};
-      const classMap = dateMap[selectedClassId] || {};
-
-      return {
-        ...prev,
-        [selectedDate]: {
-          ...dateMap,
-          [selectedClassId]: {
-            ...classMap,
-            [studentId]: {
-              ...classMap[studentId],
-              status
-            }
-          }
-        }
-      };
-    });
-  };
-
-  const handleNoteChange = (studentId, note) => {
-    setAttendance((prev) => {
-      const dateMap = prev[selectedDate] || {};
-      const classMap = dateMap[selectedClassId] || {};
-
-      return {
-        ...prev,
-        [selectedDate]: {
-          ...dateMap,
-          [selectedClassId]: {
-            ...classMap,
-            [studentId]: {
-              ...classMap[studentId],
-              notes: note
-            }
-          }
-        }
-      };
-    });
   };
 
   const saveAttendance = () => {
@@ -128,24 +111,13 @@ export default function App() {
       alert('لا يوجد طلاب في هذا الفصل');
       return;
     }
-
-    const dateMap = attendance[selectedDate] || {};
-    const classMap = dateMap[selectedClassId] || {};
-
-    classStudents.forEach((student) => {
-      if (!classMap[student.id]) {
-        classMap[student.id] = { status: 'absent', notes: '' };
-      }
+    setAttendance((previous) => {
+      const classRecords = { ...(previous[selectedDate]?.[selectedClassId] || {}) };
+      classStudents.forEach((student) => {
+        classRecords[student.id] ||= { status: 'absent', notes: '' };
+      });
+      return { ...previous, [selectedDate]: { ...(previous[selectedDate] || {}), [selectedClassId]: classRecords } };
     });
-
-    setAttendance((prev) => ({
-      ...prev,
-      [selectedDate]: {
-        ...dateMap,
-        [selectedClassId]: classMap
-      }
-    }));
-
     alert('تم حفظ الحضور بنجاح');
   };
 
@@ -153,48 +125,21 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <h1>سجل الحضور</h1>
-
         <section>
           <h2>إضافة فصل</h2>
           <form onSubmit={addClass} className="stack-form">
-            <input
-              type="text"
-              value={className}
-              onChange={(e) => setClassName(e.target.value)}
-              placeholder="اسم الفصل"
-            />
+            <input value={className} onChange={(event) => setClassName(event.target.value)} placeholder="اسم الفصل" />
             <button type="submit">إضافة فصل</button>
           </form>
         </section>
-
         <section>
           <h2>إضافة طالب</h2>
           <form onSubmit={addStudent} className="stack-form">
-            <select
-              value={selectedClassId}
-              onChange={(e) => setSelectedClassId(Number(e.target.value))}
-            >
-              {classes.map((cls) => (
-                <option key={cls.id} value={cls.id}>
-                  {cls.name}
-                </option>
-              ))}
+            <select value={selectedClassId} onChange={(event) => setSelectedClassId(Number(event.target.value))}>
+              {classes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
-
-            <input
-              type="text"
-              value={studentName}
-              onChange={(e) => setStudentName(e.target.value)}
-              placeholder="اسم الطالب"
-            />
-
-            <input
-              type="text"
-              value={rollNumber}
-              onChange={(e) => setRollNumber(e.target.value)}
-              placeholder="رقم القائمة"
-            />
-
+            <input value={studentName} onChange={(event) => setStudentName(event.target.value)} placeholder="اسم الطالب" />
+            <input value={rollNumber} onChange={(event) => setRollNumber(event.target.value)} placeholder="رقم القائمة" />
             <button type="submit">إضافة طالب</button>
           </form>
         </section>
@@ -202,109 +147,36 @@ export default function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div>
-            <h2>معهد الشروق</h2>
-          </div>
-
-          <div className="date-box">
-            <label>التاريخ</label>
-            <input
-              type="date"
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-            />
-          </div>
+          <div><h2>معهد الشروق</h2><p>إدارة الحضور والتقارير</p></div>
+          <div className="date-box"><label>التاريخ</label><input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} /></div>
         </header>
 
-        <section className="class-picker">
-          <label>حدد الفصل</label>
-          <select
-            value={selectedClassId}
-            onChange={(e) => setSelectedClassId(Number(e.target.value))}
-          >
-            {classes.map((cls) => (
-              <option key={cls.id} value={cls.id}>
-                {cls.name}
-              </option>
-            ))}
-          </select>
+        <section className="class-picker"><label>حدد الفصل</label><select value={selectedClassId} onChange={(event) => setSelectedClassId(Number(event.target.value))}>{classes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></section>
+
+        <section className="stats-grid">
+          <div className="stat-card"><span>عدد الطلاب</span><strong>{classStudents.length}</strong></div>
+          <div className="stat-card present"><span>حاضر اليوم</span><strong>{dailyStats.present}</strong></div>
+          <div className="stat-card absent"><span>غائب اليوم</span><strong>{dailyStats.absent}</strong></div>
+          <div className="stat-card late"><span>متأخر اليوم</span><strong>{dailyStats.late}</strong></div>
         </section>
 
         <section className="attendance-panel">
-          <div className="attendance-header">
-            <h3>قائمة الحضور</h3>
-            <button onClick={saveAttendance}>حفظ الحضور</button>
-          </div>
+          <div className="attendance-header"><h3>تسجيل حضور يوم {selectedDate}</h3><button onClick={saveAttendance}>حفظ الحضور</button></div>
+          <div className="table-wrap"><table><thead><tr><th>#</th><th>اسم الطالب</th><th>رقم القائمة</th><th>حاضر</th><th>غائب</th><th>متأخر</th><th>ملاحظات</th></tr></thead><tbody>
+            {!classStudents.length ? <tr><td colSpan="7">لا يوجد طلاب في هذا الفصل</td></tr> : classStudents.map((student, index) => {
+              const record = recordsForDate[student.id] || { status: 'absent', notes: '' };
+              return <tr key={student.id}><td>{index + 1}</td><td>{student.name}</td><td>{student.rollNumber}</td>
+                {['present', 'absent', 'late'].map((status) => <td key={status}><input type="radio" name={`status-${student.id}`} checked={record.status === status} onChange={() => updateRecord(student.id, { status })} /></td>)}
+                <td><input className="notes-input" value={record.notes || ''} onChange={(event) => updateRecord(student.id, { notes: event.target.value })} placeholder="ملاحظات" /></td></tr>;
+            })}
+          </tbody></table></div>
+        </section>
 
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>اسم الطالب</th>
-                  <th>رقم القائمة</th>
-                  <th>حاضر</th>
-                  <th>غائب</th>
-                  <th>متأخر</th>
-                  <th>ملاحظات</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {classStudents.length === 0 ? (
-                  <tr>
-                    <td colSpan="7">لا توجد طلاب في هذا الفصل</td>
-                  </tr>
-                ) : (
-                  classStudents.map((student, index) => {
-                    const currentRecord = recordsForDate[student.id] || { status: 'absent', notes: '' };
-                    const status = currentRecord.status || 'absent';
-                    const notes = currentRecord.notes || '';
-
-                    return (
-                      <tr key={student.id}>
-                        <td>{index + 1}</td>
-                        <td>{student.name}</td>
-                        <td>{student.rollNumber}</td>
-                        <td>
-                          <input
-                            type="radio"
-                            name={`status-${student.id}`}
-                            checked={status === 'present'}
-                            onChange={() => handleStatusChange(student.id, 'present')}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="radio"
-                            name={`status-${student.id}`}
-                            checked={status === 'absent'}
-                            onChange={() => handleStatusChange(student.id, 'absent')}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="radio"
-                            name={`status-${student.id}`}
-                            checked={status === 'late'}
-                            onChange={() => handleStatusChange(student.id, 'late')}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            className="notes-input"
-                            value={notes}
-                            onChange={(e) => handleNoteChange(student.id, e.target.value)}
-                            placeholder="ملاحظات"
-                          />
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+        <section className="attendance-panel report-panel">
+          <div className="attendance-header"><div><h3>تقرير وإحصائيات الفصل</h3><p>ملخص جميع سجلات الحضور المحفوظة</p></div><button onClick={() => window.print()}>طباعة التقرير</button></div>
+          <div className="table-wrap"><table><thead><tr><th>الطالب</th><th>عدد الأيام المسجلة</th><th>حاضر</th><th>غائب</th><th>متأخر</th><th>نسبة الحضور</th></tr></thead><tbody>
+            {!reportRows.length ? <tr><td colSpan="6">لا توجد بيانات تقرير</td></tr> : reportRows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.total}</td><td className="text-present">{row.present}</td><td className="text-absent">{row.absent}</td><td className="text-late">{row.late}</td><td>{row.total ? `${Math.round((row.present / row.total) * 100)}%` : '0%'}</td></tr>)}
+          </tbody></table></div>
         </section>
       </main>
     </div>
